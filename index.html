@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>AR Business Card (QR + Image Tracking)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<style>
+  html,body {margin:0;padding:0;font-family:system-ui,Helvetica,Arial,sans-serif;background:#000;color:#fff;}
+  #qr-stage, #ar-stage {position:fixed;inset:0;display:flex;align-items:center;justify-content:center;}
+  #qr-stage {flex-direction:column;gap:1rem;background:#000;}
+  #qr-canvas {display:none;}
+  #status {font-size:0.9rem;opacity:0.8;}
+  #start-btn {background:#0d0d17;color:#fff;border:1px solid #444;padding:.75rem 1.25rem;font-size:1rem;cursor:pointer;border-radius:6px;}
+  #overlay-tip {position:fixed;bottom:0;left:0;right:0;text-align:center;padding:.65rem .5rem;background:rgba(0,0,0,.55);font-size:.8rem;}
+  #enter-ar {margin-top:.5rem;font-size:.8rem;opacity:.65;}
+  #loading {position:absolute;top:1rem;left:50%;transform:translateX(-50%);background:#111;padding:.5rem 1rem;border-radius:4px;font-size:.8rem;}
+  canvas {touch-action:none;}
+</style>
+</head>
+<body>
+
+<div id="qr-stage">
+  <h2 style="margin:0;font-weight:600;">Point at QR Code</h2>
+  <video id="qr-video" playsinline muted style="width:90vw;max-width:480px;border:1px solid #222;border-radius:8px;"></video>
+  <canvas id="qr-canvas"></canvas>
+  <div id="status">Initializing camera…</div>
+  <button id="start-btn">Start Camera</button>
+  <div id="enter-ar">The AR experience will auto-start after we read the correct QR.</div>
+</div>
+
+<div id="ar-stage" style="display:none;">
+  <div id="loading">Loading AR…</div>
+  <div id="overlay-tip">Move the card slowly into view. Good lighting helps tracking.</div>
+  <div id="mindar-container" style="width:100vw;height:100vh;"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://unpkg.com/three@0.157.0/build/three.min.js"></script>
+<script src="https://unpkg.com/mind-ar@1.2.5/dist/mindar-image-three.prod.js"></script>
+
+<script>
+const EXPECTED_QR_TEXT = "BLUECHIP-CARD-AR"; 
+const CARD_IMAGE_URL = "card-image.jpg"; 
+const MODEL_URL = "city.glb"; 
+
+const qrVideo = document.getElementById('qr-video');
+const qrCanvas = document.getElementById('qr-canvas');
+const qrCtx = qrCanvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('start-btn');
+
+let scanning = false;
+let qrStream = null;
+
+startBtn.addEventListener('click', async () => {
+  await startQR();
+});
+
+async function startQR() {
+  try {
+    statusEl.textContent = "Requesting camera…";
+    startBtn.style.display = "none";
+    qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    qrVideo.srcObject = qrStream;
+    await qrVideo.play();
+    statusEl.textContent = "Scanning for QR…";
+    scanning = true;
+    tickQR();
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = "Camera error: " + e.message;
+  }
+}
+
+function tickQR() {
+  if (!scanning) return;
+  if (qrVideo.readyState === qrVideo.HAVE_ENOUGH_DATA) {
+    qrCanvas.width = qrVideo.videoWidth;
+    qrCanvas.height = qrVideo.videoHeight;
+    qrCtx.drawImage(qrVideo, 0, 0, qrCanvas.width, qrCanvas.height);
+    const imageData = qrCtx.getImageData(0, 0, qrCanvas.width, qrCanvas.height);
+    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+    if (code) {
+      if (code.data === EXPECTED_QR_TEXT) {
+        statusEl.textContent = "QR recognized. Launching AR…";
+        scanning = false;
+        stopQR();
+        setTimeout(initAR, 500);
+        return;
+      } else {
+        statusEl.textContent = "Different QR detected (“" + code.data + "”). Looking for target…";
+      }
+    }
+  }
+  requestAnimationFrame(tickQR);
+}
+
+function stopQR() {
+  if (qrStream) {
+    qrStream.getTracks().forEach(t => t.stop());
+  }
+}
+
+async function initAR() {
+  document.getElementById('qr-stage').style.display = "none";
+  document.getElementById('ar-stage').style.display = "flex";
+
+  const mindarThree = new window.MINDAR.IMAGE.MindARThree({
+    container: document.getElementById("mindar-container"),
+    imageTargetSrc: CARD_IMAGE_URL,
+    maxTrack: 1,
+    uiLoading: false,
+    uiScanning: false,
+    uiError: false,
+    filterMinCF: 0.0001,
+    filterBeta: 0.001
+  });
+
+  const { renderer, scene, camera } = mindarThree;
+
+  const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
+  scene.add(light);
+
+  const anchor = mindarThree.addAnchor(0);
+
+  const loader = new THREE.GLTFLoader();
+  loader.load(MODEL_URL, (gltf) => {
+    const city = gltf.scene;
+    city.scale.set(0.1, 0.1, 0.1);
+    city.position.set(0, 0.1, 0);
+    anchor.group.add(city);
+  });
+
+  const script = document.createElement('script');
+  script.src = "https://unpkg.com/three@0.157.0/examples/js/loaders/GLTFLoader.js";
+  document.head.appendChild(script);
+
+  anchor.onTargetFound = () => {
+    document.getElementById('loading').style.display = "none";
+  };
+  anchor.onTargetLost = () => {
+  };
+
+  await mindarThree.start();
+  renderer.setAnimationLoop(() => {
+    renderer.render(scene, camera);
+  });
+}
+</script>
+</body>
+</html>
